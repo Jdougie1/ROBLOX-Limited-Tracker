@@ -1,0 +1,322 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import requests
+import random
+import time
+import threading
+import json
+import webbrowser
+from datetime import datetime
+import platform
+import os
+
+# Replace with your .ROBLOSECURITY cookie value if available
+ROBLOSECURITY = ''
+
+class RobloxLimitedTracker:
+    def __init__(self):
+        # Log storage before GUI is ready
+        self.pending_logs = []
+        # Open log file for appending logs
+        self.log_file = open("tracker_log.txt", "a", encoding="utf-8")
+        
+        # Create main window
+        self.root = tk.Tk()
+        self.root.title("Roblox Limited Tracker")
+        self.root.geometry("600x450")
+        
+        # Set up protocol to close file on exit
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Initialize GUI components
+        self.setup_gui()
+        
+        # Initialize other variables
+        self.monitoring = False
+        self.monitor_thread = None
+        self.session = requests.Session()
+        
+        # Set up authentication headers
+        self.setup_session()
+        
+        # Display any pending logs
+        self.flush_pending_logs()
+    
+    def on_closing(self):
+        # Stop monitoring if running
+        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=1)
+        self.log_file.close()
+        self.root.destroy()
+    
+    def preliminary_log(self, message):
+        """Store logs before GUI is ready and write to file."""
+        timestamp = time.strftime('%H:%M:%S')
+        log_entry = f"{timestamp} - {message}"
+        self.pending_logs.append(log_entry)
+        print(log_entry)
+        self.log_file.write(log_entry + "\n")
+        self.log_file.flush()
+    
+    def flush_pending_logs(self):
+        """Display any stored logs in the GUI."""
+        if hasattr(self, 'output_text'):
+            for log in self.pending_logs:
+                self.output_text.insert("end", log + "\n")
+            self.output_text.see("end")
+            self.pending_logs = []
+    
+    def log_message(self, message):
+        """Log messages to GUI and file."""
+        timestamp = time.strftime('%H:%M:%S')
+        log_entry = f"{timestamp} - {message}"
+        if hasattr(self, 'output_text'):
+            self.output_text.insert("end", log_entry + "\n")
+            self.output_text.see("end")
+        else:
+            self.preliminary_log(message)
+        print(log_entry)
+        self.log_file.write(log_entry + "\n")
+        self.log_file.flush()
+    
+    def setup_gui(self):
+        # Input Frame
+        input_frame = ttk.LabelFrame(self.root, text="Input", padding="10")
+        input_frame.pack(fill="x", padx=10, pady=5)
+        
+        # Item ID
+        ttk.Label(input_frame, text="Limited Item ID:").grid(row=0, column=0, sticky="w")
+        self.item_id = ttk.Entry(input_frame)
+        self.item_id.grid(row=0, column=1, padx=5, pady=5)
+        
+        # Target Price
+        ttk.Label(input_frame, text="Target Price:").grid(row=1, column=0, sticky="w")
+        self.target_price = ttk.Entry(input_frame)
+        self.target_price.grid(row=1, column=1, padx=5, pady=5)
+        
+        # Interval
+        ttk.Label(input_frame, text="Check Interval (seconds):").grid(row=2, column=0, sticky="w")
+        self.interval = ttk.Entry(input_frame)
+        self.interval.grid(row=2, column=1, padx=5, pady=5)
+        
+        # Buttons Frame
+        button_frame = ttk.Frame(self.root)
+        button_frame.pack(fill="x", padx=10, pady=5)
+        
+        self.start_button = ttk.Button(button_frame, text="Start Monitoring", command=self.start_monitoring)
+        self.start_button.pack(side="left", padx=5)
+        
+        self.stop_button = ttk.Button(button_frame, text="Stop Monitoring", command=self.stop_monitoring, state="disabled")
+        self.stop_button.pack(side="left", padx=5)
+        
+        # Output Frame
+        output_frame = ttk.LabelFrame(self.root, text="Output", padding="10")
+        output_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        self.output_text = tk.Text(output_frame, height=15, wrap="word")
+        self.output_text.pack(fill="both", expand=True)
+    
+    def setup_session(self):
+        try:
+            self.session = requests.Session()
+            self.session.cookies['.ROBLOSECURITY'] = ROBLOSECURITY
+            self.session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'application/json, text/plain, */*',
+                'Content-Type': 'application/json',
+                'Origin': 'https://www.roblox.com',
+                'Referer': 'https://www.roblox.com/',
+                'Connection': 'keep-alive'
+            })
+            self.session.verify = True
+            
+            token = self.get_x_csrf_token()
+            if token:
+                self.session.headers['X-CSRF-TOKEN'] = token
+                self.preliminary_log("Successfully obtained CSRF token")
+            
+            auth_check = self.session.get('https://users.roblox.com/v1/users/authenticated')
+            if auth_check.status_code == 200:
+                user_data = auth_check.json()
+                self.preliminary_log(f"Successfully authenticated as user ID: {user_data.get('id')}")
+            else:
+                self.preliminary_log("Failed to authenticate. Please check your cookie.")
+        except Exception as e:
+            self.preliminary_log(f"Error setting up session: {str(e)}")
+    
+    def make_request(self, url, method='get', data=None, params=None, max_retries=3, retry_delay=1):
+        for attempt in range(max_retries):
+            try:
+                if method.lower() == 'get':
+                    response = self.session.get(url, params=params, timeout=10)
+                else:
+                    response = self.session.post(url, json=data, timeout=10)
+                return response
+            except requests.exceptions.RequestException as e:
+                if attempt == max_retries - 1:
+                    raise e
+                time.sleep(retry_delay)
+        return None
+
+    def get_item_details(self, item_id):
+        try:
+            response = self.make_request(f"https://catalog.roblox.com/v1/catalog/items/{item_id}/details")
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "Name": data.get("name"),
+                    "IsForSale": data.get("isForSale"),
+                    "ProductId": data.get("productId"),
+                    "Price": data.get("price", 0)
+                }
+            response = self.make_request(f"https://economy.roblox.com/v2/assets/{item_id}/details")
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    "Name": data.get("Name"),
+                    "IsForSale": data.get("IsForSale"),
+                    "ProductId": data.get("ProductId"),
+                    "Price": data.get("PriceInRobux", 0)
+                }
+            self.log_message(f"Failed to fetch item details. Status code: {response.status_code}")
+            return None
+        except Exception as e:
+            self.log_message(f"Error fetching item details: {str(e)}")
+            return None
+
+    def get_sellers(self, item_id):
+        try:
+            response = self.make_request(
+                f"https://economy.roblox.com/v1/assets/{item_id}/resellers",
+                params={"limit": 10}
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if 'data' in data:
+                    sellers = data['data']
+                    valid_sellers = [s for s in sellers if s.get('price') is not None]
+                    if valid_sellers:
+                        return sorted(valid_sellers, key=lambda x: x['price'])
+            response = self.make_request(
+                f"https://economy.roblox.com/v1/assets/{item_id}/resale-data"
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if data.get('priceDataPoints'):
+                    lowest_price = min(p['value'] for p in data['priceDataPoints'])
+                    return [{'price': lowest_price}]
+            return None
+        except Exception as e:
+            self.log_message(f"Error fetching sellers: {str(e)}")
+            return None
+
+    def get_x_csrf_token(self):
+        try:
+            response = self.session.get('https://www.roblox.com/home', headers={'X-CSRF-TOKEN': ''})
+            if response.headers.get('x-csrf-token'):
+                return response.headers['x-csrf-token']
+        except Exception as e:
+            self.log_message(f"Error getting CSRF token: {str(e)}")
+        return None
+
+    def open_item_page(self, item_id):
+        url = f"https://www.roblox.com/catalog/{item_id}/"
+        webbrowser.open(url)
+        self.log_message(f"Opened item page: {url}")
+
+    def beep_notification(self):
+        # Cross-platform beep: use winsound on Windows, otherwise use Tkinter's bell.
+        if platform.system() == "Windows":
+            try:
+                import winsound
+                winsound.Beep(1000, 500)
+            except Exception as e:
+                self.log_message(f"Beep error: {str(e)}")
+        else:
+            self.root.bell()
+
+    def stop_monitoring(self):
+        self.monitoring = False
+        if self.monitor_thread:
+            self.monitor_thread.join(timeout=1)
+        self.start_button.config(state="normal")
+        self.stop_button.config(state="disabled")
+        self.log_message("Monitoring stopped")
+        
+    def monitor_item(self):
+        while self.monitoring:
+            try:
+                item_id = self.item_id.get().strip()
+                try:
+                    target_price = float(self.target_price.get().strip())
+                    base_interval = float(self.interval.get().strip())
+                except ValueError:
+                    self.log_message("Target Price and Interval must be valid numbers")
+                    time.sleep(2)
+                    continue
+                
+                actual_interval = base_interval + random.uniform(-0.234, 0.321)
+                item_details = self.get_item_details(item_id)
+                if not item_details:
+                    self.log_message("Failed to fetch item details")
+                    time.sleep(actual_interval)
+                    continue
+                
+                item_name = item_details.get("Name", "Unknown")
+                self.log_message(f"Checking {item_name} (ID: {item_id})")
+                
+                sellers = self.get_sellers(item_id)
+                if sellers:
+                    lowest_price = sellers[0].get('price', float('inf'))
+                    self.log_message(f"Lowest price: {lowest_price}")
+                    
+                    if lowest_price <= target_price:
+                        self.log_message("Target price met! Opening item page...")
+                        self.open_item_page(item_id)
+                        self.beep_notification()
+                        self.monitoring = False
+                        self.root.after(0, self.stop_monitoring)
+                        break
+                    else:
+                        self.log_message(f"Price {lowest_price} is above target price {target_price}")
+                else:
+                    self.log_message("No sellers found or item not for sale")
+                
+                if not self.monitoring:
+                    break
+                
+                time.sleep(actual_interval)
+                
+            except Exception as e:
+                self.log_message(f"Error during monitoring: {str(e)}")
+                if not self.monitoring:
+                    break
+                time.sleep(2)
+    
+    def start_monitoring(self):
+        if not all([self.item_id.get().strip(), self.target_price.get().strip(), self.interval.get().strip()]):
+            messagebox.showerror("Error", "Please fill in all fields")
+            return
+        
+        try:
+            float(self.target_price.get().strip())
+            float(self.interval.get().strip())
+        except ValueError:
+            messagebox.showerror("Error", "Target Price and Interval must be valid numbers")
+            return
+        
+        self.monitoring = True
+        self.monitor_thread = threading.Thread(target=self.monitor_item, daemon=True)
+        self.monitor_thread.start()
+        
+        self.start_button.config(state="disabled")
+        self.stop_button.config(state="normal")
+        self.log_message("Monitoring started")
+    
+    def run(self):
+        self.root.mainloop()
+
+if __name__ == "__main__":
+    app = RobloxLimitedTracker()
+    app.run()
